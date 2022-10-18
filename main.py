@@ -27,8 +27,6 @@ import utils
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-    parser.add_argument('--profile', action='store_true', help='profile')
-    parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--epochs', default=300, type=int)
 
     # Model parameters
@@ -165,17 +163,22 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # OOB
     parser.add_argument('--channels_last', type=int, default=1,
                         help='NHWC')
     parser.add_argument('--precision', type=str, default="float32",
-                        help='precision, float32, bfloat16')
+                        help='precision, float32, float16, bfloat16')
     parser.add_argument('--jit', action='store_true', default=False,
                         help='enable ipex jit fusionpath')
     parser.add_argument('--num_warmup', default=5, type=int, metavar='N',
                         help='number of warmup iterations to run')
-    parser.add_argument('--num_iters', default=100, type=int, metavar='N',
+    parser.add_argument('--num_iter', default=100, type=int, metavar='N',
                         help='number of total iterations to run')
     parser.add_argument('--device', default="cpu", type=str, help="cpu, cuda, xpu")
+    parser.add_argument('--profile', action='store_true', help='profile')
+    parser.add_argument('--batch_size', default=16, type=int)
+    parser.add_argument('--nv_fuser', action='store_true', default=False, help='enable nv fuser')
     return parser
 
 
@@ -202,7 +205,7 @@ def main(args):
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
-    if False:  # args.distributed:
+    if args.distributed:  # args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         if args.repeated_aug:
@@ -236,7 +239,7 @@ def main(args):
 
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size),
+        batch_size=int(args.batch_size),
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False
@@ -391,7 +394,25 @@ def main(args):
 
     if args.eval:
         with torch.no_grad():
-            test_stats = evaluate(data_loader_val, model, device, args)
+            if args.precision == "float16" and args.device == "cuda":
+                print("---- Use autocast fp16 cuda")
+                with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16):
+                    test_stats = evaluate(data_loader_val, model, device, args)
+            elif args.precision == "float16" and args.device == "xpu":
+                print("---- Use autocast fp16 xpu")
+                with torch.xpu.amp.autocast(enabled=True, dtype=torch.float16, cache_enabled=True):
+                    test_stats = evaluate(data_loader_val, model, device, args)
+            elif args.precision == "bfloat16" and args.device == "cpu":
+                print("---- Use autocast bf16 cpu")
+                with torch.cpu.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                    test_stats = evaluate(data_loader_val, model, device, args)
+            elif args.precision == "bfloat16" and args.device == "xpu":
+                print("---- Use autocast bf16 xpu")
+                with torch.xpu.amp.autocast(dtype=torch.bfloat16):
+                    test_stats = evaluate(data_loader_val, model, device, args)
+            else:
+                print("---- no autocast")
+                test_stats = evaluate(data_loader_val, model, device, args)
         return
 
     print(f"Start training for {args.epochs} epochs")

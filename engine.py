@@ -74,40 +74,169 @@ def evaluate(data_loader, model, device, args):
     # switch to evaluation mode
     model.eval()
 
-    for images, target in metric_logger.log_every(data_loader, 10, header):
-        images = images.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
+    if args.nv_fuser:
+       fuser_mode = "fuser2"
+    else:
+       fuser_mode = "none"
+    print("---- fuser mode:", fuser_mode)
 
-        # compute output
-        output = model(images)
-        loss = criterion(output, target)
+    total_time = 0.0
+    total_sample = 0
+    i = 0
 
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+    profile_len = min(len(data_loader), args.num_iter) // 2
+    if args.profile and args.device == "xpu":
+        for images, target in data_loader:
+            if i >= args.num_iter:
+                break
+            i += 1
+            
+            images = images.to(device, non_blocking=True)
+            if args.channels_last:
+                images = images.to(memory_format=torch.channels_last)
+            batch_size = images.shape[0]
+            # compute output
+            with torch.autograd.profiler_legacy.profile(enabled=args.profile, use_xpu=True, record_shapes=False) as prof:
+                elapsed = time.time()
+                output = model(images)
+                torch.xpu.synchronize()
+                elapsed = time.time() - elapsed
+            print("Iteration: {}, inference time: {} sec, batchSize: {}".format(i, elapsed, batch_size), flush=True)
 
-        batch_size = images.shape[0]
-        metric_logger.update(loss=loss.item())
-        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
+            if i >= args.num_warmup:
+                total_sample += args.batch_size
+                total_time += elapsed
+            if args.profile and i == profile_len:
+                import pathlib
+                timeline_dir = str(pathlib.Path.cwd()) + '/timeline/'
+                if not os.path.exists(timeline_dir):
+                    try:
+                        os.makedirs(timeline_dir)
+                    except:
+                        pass
+                torch.save(prof.key_averages().table(sort_by="self_xpu_time_total"),
+                    timeline_dir+'profile.pt')
+                torch.save(prof.key_averages(group_by_input_shape=True).table(),
+                    timeline_dir+'profile_detail.pt')
+    elif args.profile and args.device == "cuda":
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+            schedule=torch.profiler.schedule(
+                wait=profile_len,
+                warmup=2,
+                active=1,
+            ),
+            on_trace_ready=trace_handler,
+        ) as p:
+            for images, target in data_loader:
+                if i >= args.num_iter:
+                    break
+                i += 1
+                
+                images = images.to(device, non_blocking=True)
+                if args.channels_last:
+                    images = images.to(memory_format=torch.channels_last)
+                batch_size = images.shape[0]
+                # compute output
+                elapsed = time.time()
+                with torch.jit.fuser(fuser_mode):
+                    output = model(images)
+                torch.cuda.synchronize()
+                elapsed = time.time() - elapsed
+                p.step()
+                print("Iteration: {}, inference time: {} sec, batchSize: {}".format(i, elapsed, batch_size), flush=True)
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-def save_profile_result(filename, table):
-    import xlsxwriter
-    workbook = xlsxwriter.Workbook(filename)
-    worksheet = workbook.add_worksheet()
-    keys = ["Name", "Self CPU total %", "Self CPU total", "CPU total %" , "CPU total", \
-            "CPU time avg", "Number of Calls"]
-    for j in range(len(keys)):
-        worksheet.write(0, j, keys[j])
+                if i >= args.num_warmup:
+                    total_sample += args.batch_size
+                    total_time += elapsed
+    elif args.profile and args.device == "cpu":
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU],
+            record_shapes=True,
+            schedule=torch.profiler.schedule(
+                wait=profile_len,
+                warmup=2,
+                active=1,
+            ),
+            on_trace_ready=trace_handler,
+        ) as p:
+            for images, target in data_loader:
+                if i >= args.num_iter:
+                    break
+                i += 1
+                
+                images = images.to(device, non_blocking=True)
+                if args.channels_last:
+                    images = images.to(memory_format=torch.channels_last)
+                batch_size = images.shape[0]
+                # compute output
+                elapsed = time.time()
+                output = model(images)
+                elapsed = time.time() - elapsed
+                p.step()
+                print("Iteration: {}, inference time: {} sec, batchSize: {}".format(i, elapsed, batch_size), flush=True)
 
-    lines = table.split("\n")
-    for i in range(3, len(lines)-4):
-        words = lines[i].split(" ")
-        j = 0
-        for word in words:
-            if not word == "":
-                worksheet.write(i-2, j, word)
-                j += 1
-    workbook.close()
+                if i >= args.num_warmup:
+                    total_sample += args.batch_size
+                    total_time += elapsed
+    elif not args.profile and args.device == "cuda":
+        for images, target in data_loader:
+            if i >= args.num_iter:
+                break
+            i += 1
+            
+            images = images.to(device, non_blocking=True)
+            if args.channels_last:
+                images = images.to(memory_format=torch.channels_last)
+            batch_size = images.shape[0]
+            # compute output
+            elapsed = time.time()
+            with torch.jit.fuser(fuser_mode):
+                output = model(images)
+            torch.cuda.synchronize()
+            elapsed = time.time() - elapsed
+            print("Iteration: {}, inference time: {} sec, batchSize: {}".format(i, elapsed, batch_size), flush=True)
 
+            if i >= args.num_warmup:
+                total_sample += args.batch_size
+                total_time += elapsed
+    else:
+        for images, target in data_loader:
+            if i >= args.num_iter:
+                break
+            i += 1
+            
+            images = images.to(device, non_blocking=True)
+            if args.channels_last:
+                images = images.to(memory_format=torch.channels_last)
+            batch_size = images.shape[0]
+            # compute output
+            elapsed = time.time()
+            output = model(images)
+            elapsed = time.time() - elapsed
+            print("Iteration: {}, inference time: {} sec, batchSize: {}".format(i, elapsed, batch_size), flush=True)
+
+            if i >= args.num_warmup:
+                total_sample += args.batch_size
+                total_time += elapsed
+    latency = total_time / total_sample * 1000
+    throughput = total_sample / total_time
+    print("inference Latency: {} ms".format(latency))
+    print("inference Throughput: {} samples/s".format(throughput))
+
+    return {}
+
+def trace_handler(p):
+    output = p.key_averages().table(sort_by="self_cpu_time_total")
+    print(output)
+    import pathlib
+    timeline_dir = str(pathlib.Path.cwd()) + '/timeline/'
+    if not os.path.exists(timeline_dir):
+        try:
+            os.makedirs(timeline_dir)
+        except:
+            pass
+    timeline_file = timeline_dir + 'timeline-' + str(torch.backends.quantized.engine) + \
+            '-' + str(p.step_num) + '-' + str(os.getpid()) + '.json'
+    p.export_chrome_trace(timeline_file)
