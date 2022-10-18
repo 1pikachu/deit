@@ -6,7 +6,7 @@ Train and eval functions used in main.py
 import math
 import sys
 from typing import Iterable, Optional
-
+import os
 import torch
 
 from timm.data import Mixup
@@ -14,6 +14,7 @@ from timm.utils import accuracy, ModelEma
 
 from losses import DistillationLoss
 import utils
+import time
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
@@ -64,8 +65,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device):
-    criterion = torch.nn.CrossEntropyLoss()
+def evaluate(data_loader, model, device, args):
+    criterion = torch.nn.CrossEntropyLoss().to(device)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
@@ -78,9 +79,8 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast():
-            output = model(images)
-            loss = criterion(output, target)
+        output = model(images)
+        loss = criterion(output, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
@@ -90,7 +90,24 @@ def evaluate(data_loader, model, device):
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
-          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+def save_profile_result(filename, table):
+    import xlsxwriter
+    workbook = xlsxwriter.Workbook(filename)
+    worksheet = workbook.add_worksheet()
+    keys = ["Name", "Self CPU total %", "Self CPU total", "CPU total %" , "CPU total", \
+            "CPU time avg", "Number of Calls"]
+    for j in range(len(keys)):
+        worksheet.write(0, j, keys[j])
+
+    lines = table.split("\n")
+    for i in range(3, len(lines)-4):
+        words = lines[i].split(" ")
+        j = 0
+        for word in words:
+            if not word == "":
+                worksheet.write(i-2, j, word)
+                j += 1
+    workbook.close()
+

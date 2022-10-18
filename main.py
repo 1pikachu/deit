@@ -7,7 +7,7 @@ import time
 import torch
 import torch.backends.cudnn as cudnn
 import json
-
+import os
 from pathlib import Path
 
 from timm.data import Mixup
@@ -27,7 +27,8 @@ import utils
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
-    parser.add_argument('--batch-size', default=64, type=int)
+    parser.add_argument('--profile', action='store_true', help='profile')
+    parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--epochs', default=300, type=int)
 
     # Model parameters
@@ -42,7 +43,7 @@ def get_args_parser():
 
     parser.add_argument('--model-ema', action='store_true')
     parser.add_argument('--no-model-ema', action='store_false', dest='model_ema')
-    parser.set_defaults(model_ema=True)
+    parser.set_defaults(model_ema=False)
     parser.add_argument('--model-ema-decay', type=float, default=0.99996, help='')
     parser.add_argument('--model-ema-force-cpu', action='store_true', default=False, help='')
 
@@ -93,6 +94,7 @@ def get_args_parser():
                         help='Use AutoAugment policy. "v0" or "original". " + \
                              "(default: rand-m9-mstd0.5-inc1)'),
     parser.add_argument('--smoothing', type=float, default=0.1, help='Label smoothing (default: 0.1)')
+    parser.add_argument('--arch', type=str, default="", help='model name')
     parser.add_argument('--train-interpolation', type=str, default='bicubic',
                         help='Training interpolation (random, bilinear, bicubic default: "bicubic")')
 
@@ -146,13 +148,11 @@ def get_args_parser():
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--device', default='cuda',
-                        help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
+    parser.add_argument('--eval', action='store_true', help='Perform evaluation only')  
     parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
     parser.add_argument('--num_workers', default=10, type=int)
     parser.add_argument('--pin-mem', action='store_true',
@@ -165,6 +165,17 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+    parser.add_argument('--channels_last', type=int, default=1,
+                        help='NHWC')
+    parser.add_argument('--precision', type=str, default="float32",
+                        help='precision, float32, bfloat16')
+    parser.add_argument('--jit', action='store_true', default=False,
+                        help='enable ipex jit fusionpath')
+    parser.add_argument('--num_warmup', default=5, type=int, metavar='N',
+                        help='number of warmup iterations to run')
+    parser.add_argument('--num_iters', default=100, type=int, metavar='N',
+                        help='number of total iterations to run')
+    parser.add_argument('--device', default="cpu", type=str, help="cpu, cuda, xpu")
     return parser
 
 
@@ -176,6 +187,10 @@ def main(args):
     if args.distillation_type != 'none' and args.finetune and not args.eval:
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
+    if args.device == "xpu":
+        import intel_pytorch_extension as ipex
+    elif args.device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = False
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -184,12 +199,10 @@ def main(args):
     np.random.seed(seed)
     # random.seed(seed)
 
-    cudnn.benchmark = True
-
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
-    if True:  # args.distributed:
+    if False:  # args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         if args.repeated_aug:
@@ -231,17 +244,17 @@ def main(args):
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    '''
     if mixup_active:
         mixup_fn = Mixup(
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
-
+    '''
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
         pretrained=False,
-        num_classes=args.nb_classes,
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
@@ -284,6 +297,21 @@ def main(args):
         model.load_state_dict(checkpoint_model, strict=False)
 
     model.to(device)
+    if args.channels_last:
+        oob_model = model
+        try:
+            oob_model = oob_model.to(memory_format=torch.channels_last)
+            print("[INFO] Use NHWC model")
+        except:
+            print("[WARN] Model NHWC failed! Use normal model")
+        model = oob_model
+
+    if args.jit:
+        try:
+            model = torch.jit.script(model)
+            print("[INFO] JIT enabled.")
+        except:
+            print("[WARN] JIT disabled.")
 
     model_ema = None
     if args.model_ema:
@@ -317,6 +345,7 @@ def main(args):
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
+    criterion = criterion.to(device = device)
 
     teacher_model = None
     if args.distillation_type != 'none':
@@ -361,8 +390,8 @@ def main(args):
                 loss_scaler.load_state_dict(checkpoint['scaler'])
 
     if args.eval:
-        test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        with torch.no_grad():
+            test_stats = evaluate(data_loader_val, model, device, args)
         return
 
     print(f"Start training for {args.epochs} epochs")
