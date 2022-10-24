@@ -191,7 +191,7 @@ def main(args):
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
     if args.device == "xpu":
-        import intel_pytorch_extension as ipex
+        import intel_extension_for_pytorch
     elif args.device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = False
     device = torch.device(args.device)
