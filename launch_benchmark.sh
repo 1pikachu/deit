@@ -60,7 +60,7 @@ function generate_core {
         fi
         printf " ${OOB_EXEC_HEADER} \
 	    python main.py --eval --resume ${CKPT_DIR} \
-		--data_path ${DATASET_DIR} --batch_size ${batch_size} \
+		--data-path ${DATASET_DIR} --batch_size ${batch_size} \
 	    	--num_iter $num_iter --num_warmup $num_warmup \
 		--channels_last $channels_last --precision $precision \
 		--jit --device ${device} \
@@ -100,7 +100,7 @@ function generate_core_launcher {
 }
 
 # download common files
-wget -q -O common.sh https://raw.githubusercontent.com/mengfei25/oob-common/gpuoob/common.sh
+timeout 10s wget -q -O common.sh https://raw.githubusercontent.com/mengfei25/oob-common/gpuoob/common.sh || cp /tmp/common.sh .
 
 # Start
 main "$@"

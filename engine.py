@@ -66,6 +66,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
 @torch.no_grad()
 def evaluate(data_loader, model, device, args):
+    if args.jit:
+        try:
+            model = torch.jit.script(model)
+            print("[INFO] JIT enabled.")
+        except:
+            print("[WARN] JIT disabled.")
+
     criterion = torch.nn.CrossEntropyLoss().to(device)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -91,13 +98,13 @@ def evaluate(data_loader, model, device, args):
                 break
             i += 1
             
-            images = images.to(device, non_blocking=True)
             if args.channels_last:
                 images = images.to(memory_format=torch.channels_last)
             batch_size = images.shape[0]
             # compute output
             with torch.autograd.profiler_legacy.profile(enabled=args.profile, use_xpu=True, record_shapes=False) as prof:
                 elapsed = time.time()
+                images = images.to(device, non_blocking=True)
                 output = model(images)
                 torch.xpu.synchronize()
                 elapsed = time.time() - elapsed
@@ -134,12 +141,12 @@ def evaluate(data_loader, model, device, args):
                     break
                 i += 1
                 
-                images = images.to(device, non_blocking=True)
                 if args.channels_last:
                     images = images.to(memory_format=torch.channels_last)
                 batch_size = images.shape[0]
                 # compute output
                 elapsed = time.time()
+                images = images.to(device, non_blocking=True)
                 with torch.jit.fuser(fuser_mode):
                     output = model(images)
                 torch.cuda.synchronize()
@@ -166,12 +173,12 @@ def evaluate(data_loader, model, device, args):
                     break
                 i += 1
                 
-                images = images.to(device, non_blocking=True)
                 if args.channels_last:
                     images = images.to(memory_format=torch.channels_last)
                 batch_size = images.shape[0]
                 # compute output
                 elapsed = time.time()
+                images = images.to(device, non_blocking=True)
                 output = model(images)
                 elapsed = time.time() - elapsed
                 p.step()
@@ -186,12 +193,12 @@ def evaluate(data_loader, model, device, args):
                 break
             i += 1
             
-            images = images.to(device, non_blocking=True)
             if args.channels_last:
                 images = images.to(memory_format=torch.channels_last)
             batch_size = images.shape[0]
             # compute output
             elapsed = time.time()
+            images = images.to(device, non_blocking=True)
             with torch.jit.fuser(fuser_mode):
                 output = model(images)
             torch.cuda.synchronize()
@@ -207,13 +214,15 @@ def evaluate(data_loader, model, device, args):
                 break
             i += 1
             
-            images = images.to(device, non_blocking=True)
             if args.channels_last:
                 images = images.to(memory_format=torch.channels_last)
             batch_size = images.shape[0]
             # compute output
             elapsed = time.time()
+            images = images.to(device, non_blocking=True)
             output = model(images)
+            if args.device == "xpu":
+                torch.xpu.synchronize()
             elapsed = time.time() - elapsed
             print("Iteration: {}, inference time: {} sec, batchSize: {}".format(i, elapsed, batch_size), flush=True)
 
