@@ -9,6 +9,7 @@ function main {
     set_environment
 
     # requirements
+    pip uninstall timm -y
     git clone https://github.com/rwightman/pytorch-image-models.git -b 0.5.x
     cd pytorch-image-models && python setup.py install
     cd ..
