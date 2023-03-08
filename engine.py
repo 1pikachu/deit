@@ -68,7 +68,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 def evaluate(data_loader, model, device, args):
     if args.jit:
         try:
-            model = torch.jit.script(model)
+            img = None
+            for image, target in data_loader:
+                img = image
+                break
+            img = img.to(device)
+            model = torch.jit.trace(model, img, check_trace=False)
+            for i in range(3):
+                model(img)
             print("[INFO] JIT enabled.")
         except:
             print("[WARN] JIT disabled.")
